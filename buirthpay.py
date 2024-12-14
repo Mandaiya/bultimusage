@@ -5,7 +5,6 @@ from telegram import (
     Bot,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    ChatMember,
 )
 from telegram.ext import (
     Application,
@@ -29,6 +28,7 @@ MONGO_URI = os.getenv("MONGO_DB_URI")
 client = MongoClient(MONGO_URI)
 db = client["birthday_bot"]
 users_collection = db["users"]
+groups_collection = db["groups"]
 
 # /start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -62,9 +62,7 @@ async def keyword_detection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = message.from_user
     keywords = ["birthday", "Birthday", "bornday", "Bornday"]
 
-    # Check if any of the keywords are in the message text
     if any(keyword in message.text for keyword in keywords):
-        # Respond directly to the message in the group
         await message.reply_text(
             f"🎂 @{user.username}, kindly register your birthday to receive personalized reminders and wishes! "
             f"Click the button below to register in private chat.",
@@ -73,6 +71,43 @@ async def keyword_detection(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
         )
 
+# Track groups
+async def track_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type in ["group", "supergroup"]:
+        groups_collection.update_one(
+            {"chat_id": chat.id},
+            {"$set": {"chat_id": chat.id, "title": chat.title}},
+            upsert=True,
+        )
+
+# Notify users
+async def notify_users():
+    bot = Bot(BOT_TOKEN)
+    today = datetime.now().date()
+    tomorrow = today + timedelta(days=1)
+
+    birthdays_tomorrow = list(users_collection.find({"birthday": tomorrow.isoformat()}))
+    for user in birthdays_tomorrow:
+        try:
+            await bot.send_message(
+                chat_id=user["user_id"],
+                text=f"🎉 Reminder: Tomorrow is your birthday, @{user['username']}! 🎂 Don't forget to celebrate! 🎉",
+            )
+        except Exception as e:
+            print(f"Error notifying user: {e}")
+
+    groups = groups_collection.find()
+    for group in groups:
+        try:
+            if birthdays_tomorrow:
+                birthday_users = ", ".join([f"@{user['username']}" for user in birthdays_tomorrow])
+                await bot.send_message(
+                    chat_id=group["chat_id"],
+                    text=f"🎉 Reminder: Tomorrow is the birthday of {birthday_users}! Don't forget to wish them! 🎂",
+                )
+        except Exception as e:
+            print(f"Error notifying group: {e}")
 
 # Register birthday
 async def register_birthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -101,86 +136,17 @@ async def register_birthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"Your birthday has been registered as {birthday}. 🎉")
 
-# Notify users about upcoming birthdays
-async def notify_users():
-    bot = Bot(BOT_TOKEN)
-    today = datetime.now().date()
-    tomorrow = today + timedelta(days=1)
-
-    # Get all chats where the bot is present
-    all_chats = list(users_collection.find({"birthday": {"$exists": True}}))
-    processed_users = set()
-
-    # Notify users about upcoming birthdays
-    birthdays_tomorrow = list(users_collection.find({"birthday": tomorrow.isoformat()}))
-    for chat in all_chats:
-        try:
-            chat_members = await bot.get_chat_administrators(chat["chat_id"])
-            for member in chat_members:
-                if member.user.id not in processed_users and birthdays_tomorrow:
-                    birthday_users = ", ".join(
-                        [f"@{user['username']}" for user in birthdays_tomorrow]
-                    )
-                    await bot.send_message(
-                        chat_id=member.user.id,
-                        text=f"🎉 Reminder: Tomorrow is the birthday of {birthday_users}! Don't forget to wish them! 🎂",
-                    )
-                    processed_users.add(member.user.id)
-        except Exception as e:
-            print(f"Error in notifying users: {e}")
-
-# Birthday Wishing System
-async def send_wishes():
-    bot = Bot(BOT_TOKEN)
-    today = datetime.now().date()
-    birthdays_today = list(users_collection.find({"birthday": today.isoformat()}))
-
-    # Send personalized birthday wishes
-    for user in birthdays_today:
-        try:
-            await bot.send_message(
-                chat_id=user["user_id"],
-                text=(
-                    f"🎉 Happy Birthday, @{user['username']}! 🎂\n"
-                    "Have an amazing day filled with joy and surprises!\n\n"
-                    "From - SVD"
-                ),
-            )
-        except Exception as e:
-            print(f"Error sending birthday wish: {e}")
-
-# Schedule daily reminders
-def start_schedulers():
-    def daily_tasks():
-        while True:
-            now = datetime.now()
-            next_run = (datetime.combine(now.date(), datetime.min.time()) + timedelta(days=1))
-            sleep_duration = (next_run - now).total_seconds()
-
-            # Sleep until midnight
-            threading.Timer(sleep_duration, lambda: asyncio.run(notify_users())).start()
-            threading.Timer(sleep_duration, lambda: asyncio.run(send_wishes())).start()
-
-    thread = threading.Thread(target=daily_tasks, daemon=True)
-    thread.start()
-
 # Main function
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("register_birthday", register_birthday))
-
-    # Message handler for keyword detection
+    application.add_handler(MessageHandler(filters.ChatType.GROUP, track_group))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUP, keyword_detection))
 
-    # Start the bot
     application.run_polling()
-
-    # Start schedulers
-    start_schedulers()
 
 if __name__ == "__main__":
     main()
