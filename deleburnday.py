@@ -1,13 +1,10 @@
 import os
 from telegram import Update, Bot
-from telegram.ext import Updater, CommandHandler, CallbackContext
+from telegram.ext import Application, CommandHandler, ContextTypes
 from pymongo import MongoClient
 from datetime import datetime, timedelta
 import threading
 from dotenv import load_dotenv
-from telegram.ext import Application
-
-application = Application.builder().token(TELEGRAM_API_TOKEN).build()
 
 load_dotenv()
 
@@ -22,16 +19,16 @@ db = client["birthday_bot"]
 users_collection = db["users"]
 
 # Register birthday
-def register_birthday(update: Update, context: CallbackContext):
+async def register_birthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if len(context.args) != 1:
-        update.message.reply_text("Please provide your birthday in the format: YYYY-MM-DD\nExample: /register_birthday 1995-07-14")
+        await update.message.reply_text("Please provide your birthday in the format: YYYY-MM-DD\nExample: /register_birthday 1995-07-14")
         return
 
     try:
         birthday = datetime.strptime(context.args[0], "%Y-%m-%d").date()
     except ValueError:
-        update.message.reply_text("Invalid date format. Please use YYYY-MM-DD.")
+        await update.message.reply_text("Invalid date format. Please use YYYY-MM-DD.")
         return
 
     user_data = {
@@ -46,10 +43,10 @@ def register_birthday(update: Update, context: CallbackContext):
         upsert=True
     )
 
-    update.message.reply_text(f"Your birthday has been registered as {birthday}. 🎉")
+    await update.message.reply_text(f"Your birthday has been registered as {birthday}. 🎉")
 
 # Notify users about upcoming birthdays
-def notify_users():
+async def notify_users():
     bot = Bot(BOT_TOKEN)
 
     today = datetime.now().date()
@@ -63,13 +60,13 @@ def notify_users():
         birthday_users = ", ".join([f"@{user['username']}" for user in birthdays_tomorrow])
 
         for user in all_users:
-            bot.send_message(
+            await bot.send_message(
                 chat_id=user["user_id"],
                 text=f"🎉 Reminder: Tomorrow is the birthday of {birthday_users}! Don't forget to wish them!"
             )
 
 # Birthday Wishing System
-def send_wishes():
+async def send_wishes():
     bot = Bot(BOT_TOKEN)
 
     today = datetime.now().date()
@@ -81,7 +78,7 @@ def send_wishes():
         all_users = list(users_collection.find())
         for user in all_users:
             for birthday_user in birthdays_today:
-                bot.send_message(
+                await bot.send_message(
                     chat_id=user["user_id"],
                     text=f"🎉 Today is @{birthday_user['username']}'s birthday! Send them your wishes! 🎂"
                 )
@@ -95,28 +92,24 @@ def start_schedulers():
             sleep_duration = (next_run - now).total_seconds()
 
             # Sleep until midnight
-            threading.Timer(sleep_duration, notify_users).start()
-            threading.Timer(sleep_duration, send_wishes).start()
+            threading.Timer(sleep_duration, lambda: asyncio.run(notify_users())).start()
+            threading.Timer(sleep_duration, lambda: asyncio.run(send_wishes())).start()
 
     thread = threading.Thread(target=daily_tasks, daemon=True)
     thread.start()
 
 # Main function
 def main():
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dispatcher = updater.dispatcher
+    application = Application.builder().token(BOT_TOKEN).build()
 
     # Command handlers
-    dispatcher.add_handler(CommandHandler("register_birthday", register_birthday))
+    application.add_handler(CommandHandler("register_birthday", register_birthday))
 
     # Start the bot
-    updater.start_polling()
-    updater.idle()
+    application.run_polling()
 
     # Start schedulers
     start_schedulers()
-
-    application.run_polling()
 
 if __name__ == "__main__":
     main()
