@@ -5,6 +5,9 @@ from pymongo import MongoClient
 from datetime import datetime, timedelta
 import threading
 from dotenv import load_dotenv
+from telegram.ext import Application
+
+application = Application.builder().token(TELEGRAM_API_TOKEN).build()
 
 load_dotenv()
 
@@ -112,6 +115,8 @@ def main():
 
     # Start schedulers
     start_schedulers()
+
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
