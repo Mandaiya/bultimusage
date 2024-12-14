@@ -1,11 +1,16 @@
 import os
 import asyncio
-from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    Bot,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ChatMember,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    CallbackContext,
     ContextTypes,
     filters,
 )
@@ -58,22 +63,16 @@ async def keyword_detection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keywords = ["birthday", "Birthday", "bornday", "Bornday"]
 
     if any(keyword in message.text for keyword in keywords):
-        user_data = users_collection.find_one({"user_id": user.id})
-
-        if user_data:
-            await message.reply_text(
-                f"🎉 @{user.username}, I see you're already registered! We'll celebrate your birthday in style. 🎂"
-            )
-        else:
-            # Create an inline button to prompt registration
-            keyboard = [
-                [InlineKeyboardButton("Register in my PM", url=f"t.me/{context.bot.username}")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await message.reply_text(
-                f"🎂 @{user.username}, I see you're not registered yet! Click the button below to register your birthday in private chat.",
-                reply_markup=reply_markup,
-            )
+        # Respond to the specific message in the group
+        await message.reply_text(
+            "🎂 Kindly register your birthday to receive personalized wishes!\n"
+            "Click below to register in private chat.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("Register in PM", url=f"t.me/{context.bot.username}")]
+                ]
+            ),
+        )
 
 # Register birthday
 async def register_birthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -105,40 +104,50 @@ async def register_birthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Notify users about upcoming birthdays
 async def notify_users():
     bot = Bot(BOT_TOKEN)
-
     today = datetime.now().date()
     tomorrow = today + timedelta(days=1)
 
-    # Find users with birthdays tomorrow
+    # Get all chats where the bot is present
+    all_chats = list(users_collection.find({"birthday": {"$exists": True}}))
+    processed_users = set()
+
+    # Notify users about upcoming birthdays
     birthdays_tomorrow = list(users_collection.find({"birthday": tomorrow.isoformat()}))
-
-    if birthdays_tomorrow:
-        all_users = list(users_collection.find())
-        birthday_users = ", ".join([f"@{user['username']}" for user in birthdays_tomorrow])
-
-        for user in all_users:
-            await bot.send_message(
-                chat_id=user["user_id"],
-                text=f"🎉 Reminder: Tomorrow is the birthday of {birthday_users}! Don't forget to wish them!"
-            )
+    for chat in all_chats:
+        try:
+            chat_members = await bot.get_chat_administrators(chat["chat_id"])
+            for member in chat_members:
+                if member.user.id not in processed_users and birthdays_tomorrow:
+                    birthday_users = ", ".join(
+                        [f"@{user['username']}" for user in birthdays_tomorrow]
+                    )
+                    await bot.send_message(
+                        chat_id=member.user.id,
+                        text=f"🎉 Reminder: Tomorrow is the birthday of {birthday_users}! Don't forget to wish them! 🎂",
+                    )
+                    processed_users.add(member.user.id)
+        except Exception as e:
+            print(f"Error in notifying users: {e}")
 
 # Birthday Wishing System
 async def send_wishes():
     bot = Bot(BOT_TOKEN)
-
     today = datetime.now().date()
-
-    # Find users with birthdays today
     birthdays_today = list(users_collection.find({"birthday": today.isoformat()}))
 
-    if birthdays_today:
-        all_users = list(users_collection.find())
-        for user in all_users:
-            for birthday_user in birthdays_today:
-                await bot.send_message(
-                    chat_id=user["user_id"],
-                    text=f"🎉 Today is @{birthday_user['username']}'s birthday! Send them your wishes! 🎂"
-                )
+    # Send personalized birthday wishes
+    for user in birthdays_today:
+        try:
+            await bot.send_message(
+                chat_id=user["user_id"],
+                text=(
+                    f"🎉 Happy Birthday, @{user['username']}! 🎂\n"
+                    "Have an amazing day filled with joy and surprises!\n\n"
+                    "From - SVD"
+                ),
+            )
+        except Exception as e:
+            print(f"Error sending birthday wish: {e}")
 
 # Schedule daily reminders
 def start_schedulers():
