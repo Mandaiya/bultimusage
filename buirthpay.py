@@ -62,17 +62,17 @@ async def keyword_detection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = message.from_user
     keywords = ["birthday", "Birthday", "bornday", "Bornday"]
 
+    # Check if any of the keywords are in the message text
     if any(keyword in message.text for keyword in keywords):
-        # Respond to the specific message in the group
+        # Respond directly to the message in the group
         await message.reply_text(
-            "🎂 Kindly register your birthday to receive personalized wishes!\n"
-            "Click below to register in private chat.",
+            f"🎂 @{user.username}, kindly register your birthday to receive personalized reminders and wishes! "
+            f"Click the button below to register in private chat.",
             reply_markup=InlineKeyboardMarkup(
-                [
-                    [InlineKeyboardButton("Register in PM", url=f"t.me/{context.bot.username}")]
-                ]
+                [[InlineKeyboardButton("Register in PM", url=f"t.me/{context.bot.username}")]]
             ),
         )
+
 
 # Register birthday
 async def register_birthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
