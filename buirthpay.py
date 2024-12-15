@@ -1,23 +1,10 @@
 import os
 import asyncio
-import random
-from telegram import (
-    Update,
-    Bot,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    ChatPermissions,
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from pymongo import MongoClient
-from datetime import datetime, timedelta, time
-import threading
+from datetime import datetime, timedelta
+from random import choice
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -25,17 +12,13 @@ load_dotenv()
 # Environment variables
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_DB_URI")
+DEFAULT_NOTIFICATION_TIME = datetime.strptime("09:00:00", "%H:%M:%S").time()
 
 # MongoDB setup
 client = MongoClient(MONGO_URI)
 db = client["birthday_bot"]
 users_collection = db["users"]
-groups_collection = db["groups"]
 quotes_collection = db["quotes"]
-group_settings_collection = db["group_settings"]
-
-# Default notification time
-DEFAULT_NOTIFICATION_TIME = time(9, 0)  # 9:00 AM
 
 # /start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -47,6 +30,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- Let everyone celebrate with you on your special day!\n\n"
         "Commands:\n"
         "/register_birthday [YYYY-MM-DD] - Register your birthday.\n"
+        "/add_quote [QUOTE] - Add a custom birthday quote (admins only).\n"
+        "/set_time [HH:MM] - Set the daily notification time (admins only).\n"
         "/help - Get this help message.\n\n"
         "Add me to a group to notify others about birthdays!"
     )
@@ -58,12 +43,27 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎂 **Birthday Bot Commands** 🎂\n\n"
         "/start - Learn about this bot.\n"
         "/register_birthday [YYYY-MM-DD] - Register your birthday.\n"
+        "/add_quote [QUOTE] - Add a custom birthday quote (admins only).\n"
+        "/set_time [HH:MM] - Set the daily notification time (admins only).\n"
         "/help - Get this help message.\n\n"
-        "Admin Commands (Group Admins/Owners Only):\n"
-        "/add_quote [quote] - Add a birthday message quote.\n"
-        "/set_time [HH:MM] - Set birthday notification time (24-hour format).\n"
+        "Add me to a group to celebrate birthdays together!"
     )
     await update.message.reply_text(help_message)
+
+# Keyword detection in groups
+async def keyword_detection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    user = message.from_user
+    keywords = ["birthday", "Birthday", "bornday", "Bornday"]
+
+    if any(keyword in message.text for keyword in keywords):
+        await message.reply_text(
+            f"🎂 @{user.username}, kindly register your birthday to receive personalized reminders and wishes! "
+            f"Click the button below to register in private chat.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Register in PM", url=f"t.me/{context.bot.username}")]]
+            ),
+        )
 
 # Register birthday
 async def register_birthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -90,109 +90,80 @@ async def register_birthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
         {"user_id": user.id}, {"$set": user_data}, upsert=True
     )
 
-    await update.message.reply_text(
-        f"Your birthday has been registered as {birthday}. 🎉 "
-        "We'll notify you and your friends on your special day!"
-    )
+    await update.message.reply_text(f"Your birthday has been registered as {birthday}. 🎉")
 
-# Add birthday quotes
+# Notify users and groups
+async def notify_users_and_groups():
+    bot = Bot(BOT_TOKEN)
+    today = datetime.now().date()
+    tomorrow = today + timedelta(days=1)
+
+    # Notify users about upcoming birthdays
+    birthdays_tomorrow = list(users_collection.find({"birthday": tomorrow.isoformat()}))
+    if birthdays_tomorrow:
+        birthday_users = ", ".join([f"@{user['username']}" for user in birthdays_tomorrow])
+        all_users = list(users_collection.find())
+        for user in all_users:
+            try:
+                await bot.send_message(
+                    chat_id=user["user_id"],
+                    text=f"🎉 Reminder: Tomorrow is the birthday of {birthday_users}! Don't forget to wish them! 🎂",
+                )
+            except Exception as e:
+                print(f"Error in notifying user {user['user_id']}: {e}")
+
+# Send birthday wishes
+async def send_wishes():
+    bot = Bot(BOT_TOKEN)
+    today = datetime.now().date()
+    birthdays_today = list(users_collection.find({"birthday": today.isoformat()}))
+    all_quotes = [quote["text"] for quote in quotes_collection.find()]
+
+    for user in birthdays_today:
+        random_quote = choice(all_quotes) if all_quotes else "Happy Birthday! 🎂"
+        try:
+            await bot.send_message(
+                chat_id=user["user_id"],
+                text=(f"🎉 Happy Birthday, @{user['username']}! 🎂\n{random_quote}\n\nFrom - SVD"),
+            )
+        except Exception as e:
+            print(f"Error sending birthday wish to {user['user_id']}: {e}")
+
+# Add custom quote
 async def add_quote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Please provide a quote to add.")
         return
 
     quote = " ".join(context.args)
-    quotes_collection.insert_one({"quote": quote})
-
-    await update.message.reply_text("Quote added successfully! 🎉")
+    quotes_collection.insert_one({"text": quote})
+    await update.message.reply_text(f"Quote added: {quote}")
 
 # Set notification time
 async def set_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    chat = update.effective_chat
-
-    if chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("This command can only be used in groups.")
-        return
-
-    member = await context.bot.get_chat_member(chat.id, user.id)
-    if member.status not in ["administrator", "creator"]:
-        await update.message.reply_text("Only group admins can set the notification time.")
-        return
-
-    if len(context.args) != 1:
+    if not context.args:
         await update.message.reply_text("Please provide the time in HH:MM format.")
         return
 
     try:
-        notification_time = datetime.strptime(context.args[0], "%H:%M").time()
+        global DEFAULT_NOTIFICATION_TIME
+        DEFAULT_NOTIFICATION_TIME = datetime.strptime(context.args[0], "%H:%M").time()
+        await update.message.reply_text(f"Notification time set to {DEFAULT_NOTIFICATION_TIME.strftime('%H:%M')}.")
     except ValueError:
         await update.message.reply_text("Invalid time format. Please use HH:MM.")
-        return
 
-    group_settings_collection.update_one(
-        {"chat_id": chat.id},
-        {"$set": {"notification_time": notification_time.isoformat()}},
-        upsert=True,
-    )
-
-    await update.message.reply_text(
-        f"Notification time set to {notification_time.strftime('%H:%M')} successfully! 🎉"
-    )
-
-# Notify users and groups
-async def notify_users_and_groups():
-    bot = Bot(BOT_TOKEN)
-    today = datetime.now().date()
-
-    # Fetch birthdays today
-    birthdays_today = list(users_collection.find({"birthday": today.isoformat()}))
-
-    # Send messages to users
-    for user in birthdays_today:
-        try:
-            random_quote = quotes_collection.aggregate([{"$sample": {"size": 1}}])
-            quote = random_quote.next()["quote"] if random_quote else "🎂 Happy Birthday! Have an amazing day! 🎉"
-            await bot.send_message(
-                chat_id=user["user_id"],
-                text=f"{quote}\n\nFrom - SVD"
-            )
-        except Exception as e:
-            print(f"Error sending user birthday message: {e}")
-
-    # Notify groups
-    groups = groups_collection.find()
-    for group in groups:
-        try:
-            group_settings = group_settings_collection.find_one({"chat_id": group["chat_id"]})
-            notification_time = (
-                datetime.strptime(group_settings["notification_time"], "%H:%M").time()
-                if group_settings and "notification_time" in group_settings
-                else DEFAULT_NOTIFICATION_TIME
-            )
-
-            now = datetime.now().time()
-            if now >= notification_time:
-                birthday_users = ", ".join([f"@{user['username']}" for user in birthdays_today])
-                if birthday_users:
-                    await bot.send_message(
-                        chat_id=group["chat_id"],
-                        text=f"🎉 Today is the birthday of {birthday_users}! 🎂 Let's celebrate! 🎉"
-                    )
-        except Exception as e:
-            print(f"Error notifying group: {e}")
-
-# Scheduler for daily tasks
+# Schedule daily reminders
 def start_schedulers():
     async def daily_task():
         while True:
             now = datetime.now()
-            next_run = (datetime.combine(now.date(), DEFAULT_NOTIFICATION_TIME))
+            next_run = datetime.combine(now.date(), DEFAULT_NOTIFICATION_TIME)
             if now.time() > DEFAULT_NOTIFICATION_TIME:
                 next_run += timedelta(days=1)
             sleep_duration = (next_run - now).total_seconds()
             await asyncio.sleep(sleep_duration)
             await notify_users_and_groups()
+            await send_wishes()
 
     asyncio.create_task(daily_task())
 
@@ -207,11 +178,14 @@ def main():
     application.add_handler(CommandHandler("add_quote", add_quote))
     application.add_handler(CommandHandler("set_time", set_time))
 
-    # Start schedulers
-    start_schedulers()
+    # Message handler for keyword detection
+    application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUP, keyword_detection))
 
-    # Run bot
+    # Start the bot
     application.run_polling()
+
+    # Start schedulers after the bot starts
+    start_schedulers()
 
 if __name__ == "__main__":
     main()
